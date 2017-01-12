@@ -1,4 +1,4 @@
-import pydot, pickle, gzip, warnings
+import pickle, gzip, warnings, pydot, numpy as np
 from lasagne.layers import get_all_layers, get_all_param_values, set_all_param_values
 
 class model_visual(object):
@@ -136,6 +136,72 @@ def plot_model(model, filename, **kwargs):
     """
     model_layers = get_all_layers(model)
     model_visual.draw_to_file(layers=model_layers, filename=filename, **kwargs)
+
+def count_layer_params(layer, unwrap_shared=True, **tags):
+    """
+    Return parameter numbers for a layer, if you need to count all parameters of a model, use Lasagne's count_params() instead
+    :param layer:
+    :param unwrap_shared:
+    :param tags:
+    :return:
+    """
+    params = layer.get_params(unwrap_shared=unwrap_shared, **tags)
+    shapes = [p.get_value().shape for p in params]
+    counts = [np.prod(shape) for shape in shapes]
+    return sum(counts)
+
+def _print_row(fields, positions):
+    line = ''
+    for i in range(len(fields)):
+        line += str(fields[i])
+        line = line[:positions[i]]
+        line += ' ' * (positions[i] - len(line))
+    print(line)
+
+def print_layer_summary(layer, positions=[.33, .55, .67, 1.]):
+    output_shape = layer.output_shape
+    parent_layer_name = ''
+    if hasattr(layer, 'input_layer'):
+        parent_layer_name = layer.input_layer.name
+    elif hasattr(layer, 'input_layers'):
+        for l in layer.input_layers:
+            parent_layer_name += l.name + ', '
+        parent_layer_name = parent_layer_name[:-2]
+    else:
+        pass
+
+    fields = [layer.name + ' (' + layer.__class__.__name__ + ')', output_shape, count_layer_params(layer), parent_layer_name]
+    _print_row(fields, positions)
+
+def print_model_summary(model, line_length=100, positions=[.33, .55, .67, 1.]):
+    """
+    Print model summary, like in Keras model.summary()
+    :param model:
+    :param line_length: total length of printed lines
+    :param positions: relative or absolute positions of log elements in each line
+    :return:
+    """
+    layers = get_all_layers(model)
+
+    if positions[-1] <= 1:
+        positions = [int(line_length * p) for p in positions]
+    to_display = ['Layer (type)', 'Output Shape', 'Param #', 'Connected to']
+
+    print('_' * line_length)
+    _print_row(to_display, positions)
+    print('=' * line_length)
+
+    total_params = 0
+    for i in range(len(layers)):
+        print_layer_summary(layers[i], positions=positions)
+        if i == len(layers) - 1:
+            print('=' * line_length)
+        else:
+            print('_' * line_length)
+        total_params += count_layer_params(layers[i])
+
+    print('Total params: %s' % total_params)
+    print('_' * line_length)
 
 class chunked_byte_writer(object):
     """
@@ -281,6 +347,11 @@ def set_weights(model, model_para_values, mapping_dict=None, unwrap_shared=True,
                 p.set_value(v)
 
 def freeze_layer(layer):
+    """
+    Freeze a layer, so its weights won't be updated during training
+    :param layer:
+    :return:
+    """
     for param in layer.params:
         layer.params[param].discard('trainable')
     return layer  # optional, if you want to use it in-line

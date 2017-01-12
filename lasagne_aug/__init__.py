@@ -8,5 +8,5 @@ from . import updates
 from . import utils
 
 
-__version__ = "0.1"
+__version__ = "0.2"
 __author__  = "David Leon (Dawei Leng)"
