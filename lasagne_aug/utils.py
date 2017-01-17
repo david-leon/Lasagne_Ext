@@ -60,7 +60,7 @@ class model_visual(object):
                 color = self._get_hex_color(layer_type)
             if verbose:
                 for attr in ['num_filters', 'num_units', 'ds',
-                             'filter_shape', 'stride', 'strides', 'p']:
+                             'filter_shape', 'stride', 'strides', 'p', 'name']:
                     if hasattr(layer, attr):
                         label += '\n' + \
                                  '{0}: {1}'.format(attr, getattr(layer, attr))
