@@ -356,6 +356,12 @@ def freeze_layer(layer):
         layer.params[param].discard('trainable')
     return layer  # optional, if you want to use it in-line
 
+def get_layer_by_name(model, name):
+    layers = get_all_layers(model)
+    for layer in layers:
+        if layer.name == name:
+            return layer
+
 
 
 

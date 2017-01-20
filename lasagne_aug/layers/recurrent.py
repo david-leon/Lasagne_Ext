@@ -1,674 +1,69 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-import theano.tensor as  tensor
-from .base import *
-from . import activations, initializations
-from lasagne.layers import Layer, MergeLayer
-
-
-
-
-def time_distributed_dense(x, w, b=None, dropout=None,
-                           input_dim=None, output_dim=None, timesteps=None):
-    '''Apply y.w + b for every temporal slice y of x.
-    '''
-    if not input_dim:
-        input_dim = x.shape[2]
-    if not timesteps:
-        timesteps = x.shape[1]
-    if not output_dim:
-        output_dim = w.shape[1]
-
-    if dropout is not None and 0. < dropout < 1.:
-        # apply the same dropout pattern at every timestep
-        ones = tensor.ones_like(tensor.reshape(x[:, 0, :], (-1, input_dim)))
-        dropout_matrix = _dropout(ones, dropout)
-        expanded_dropout_matrix = _repeat(dropout_matrix, timesteps)
-        x *= expanded_dropout_matrix
-
-    # collapse time dimension and batch dimension together
-    x = tensor.reshape(x, (-1, input_dim))
-
-    x = tensor.dot(x, w)
-    if b:
-        x = x + b
-    # reshape to 3D tensor
-    x = tensor.reshape(x, (-1, timesteps, output_dim))
-    return x
-
-
-class Recurrent(MergeLayer):
-    '''Abstract base class for recurrent layers.
-    Do not use in a model -- it's not a valid layer!
-    Use its children classes `LSTM`, `GRU` and `SimpleRNN` instead.
-
-    All recurrent layers (`LSTM`, `GRU`, `SimpleRNN`) also
-    follow the specifications of this class and accept
-    the keyword arguments listed below.
-
-    # Example
-
-    ```python
-        # as the first layer in a Sequential model
-        model = Sequential()
-        model.add(LSTM(32, input_shape=(10, 64)))
-        # now model.output_shape == (None, 32)
-        # note: `None` is the batch dimension.
-
-        # the following is identical:
-        model = Sequential()
-        model.add(LSTM(32, input_dim=64, input_length=10))
-
-        # for subsequent layers, not need to specify the input size:
-        model.add(LSTM(16))
-    ```
-
-    # Arguments
-        weights: list of Numpy arrays to set as initial weights.
-            The list should have 3 elements, of shapes:
-            `[(input_dim, output_dim), (output_dim, output_dim), (output_dim,)]`.
-        return_sequences: Boolean. Whether to return the last output
-            in the output sequence, or the full sequence.
-        go_backwards: Boolean (default False).
-            If True, process the input sequence backwards.
-        stateful: Boolean (default False). If True, the last state
-            for each sample at index i in a batch will be used as initial
-            state for the sample of index i in the following batch.
-        unroll: Boolean (default False). If True, the network will be unrolled,
-            else a symbolic loop will be used. When using TensorFlow, the network
-            is always unrolled, so this argument does not do anything.
-            Unrolling can speed-up a RNN, although it tends to be more memory-intensive.
-            Unrolling is only suitable for short sequences.
-        consume_less: one of "cpu", "mem", or "gpu" (LSTM/GRU only).
-            If set to "cpu", the RNN will use
-            an implementation that uses fewer, larger matrix products,
-            thus running faster on CPU but consuming more memory.
-            If set to "mem", the RNN will use more matrix products,
-            but smaller ones, thus running slower (may actually be faster on GPU)
-            while consuming less memory.
-            If set to "gpu" (LSTM/GRU only), the RNN will combine the input gate,
-            the forget gate and the output gate into a single matrix,
-            enabling more time-efficient parallelization on the GPU. Note: RNN
-            dropout must be shared for all gates, resulting in a slightly
-            reduced regularization.
-        input_dim: dimensionality of the input (integer).
-            This argument (or alternatively, the keyword argument `input_shape`)
-            is required when using this layer as the first layer in a model.
-        input_length: Length of input sequences, to be specified
-            when it is constant.
-            This argument is required if you are going to connect
-            `Flatten` then `Dense` layers upstream
-            (without it, the shape of the dense outputs cannot be computed).
-            Note that if the recurrent layer is not the first layer
-            in your model, you would need to specify the input length
-            at the level of the first layer
-            (e.g. via the `input_shape` argument)
-
-    # Input shape
-        3D tensor with shape `(nb_samples, timesteps, input_dim)`.
-
-    # Output shape
-        - if `return_sequences`: 3D tensor with shape
-            `(nb_samples, timesteps, output_dim)`.
-        - else, 2D tensor with shape `(nb_samples, output_dim)`.
-
-    # Masking
-        This layer supports masking for input data with a variable number
-        of timesteps. To introduce masks to your data,
-        use an [Embedding](embeddings.md) layer with the `mask_zero` parameter
-        set to `True`.
-
-    # TensorFlow warning
-        For the time being, when using the TensorFlow backend,
-        the number of timesteps used must be specified in your model.
-        Make sure to pass an `input_length` int argument to your
-        recurrent layer (if it comes first in your model),
-        or to pass a complete `input_shape` argument to the first layer
-        in your model otherwise.
-
-
-    # Note on using statefulness in RNNs
-        You can set RNN layers to be 'stateful', which means that the states
-        computed for the samples in one batch will be reused as initial states
-        for the samples in the next batch.
-        This assumes a one-to-one mapping between
-        samples in different successive batches.
-
-        To enable statefulness:
-            - specify `stateful=True` in the layer constructor.
-            - specify a fixed batch size for your model, by passing
-                a `batch_input_shape=(...)` to the first layer in your model.
-                This is the expected shape of your inputs *including the batch size*.
-                It should be a tuple of integers, e.g. `(32, 10, 100)`.
-
-        To reset the states of your model, call `.reset_states()` on either
-        a specific layer, or on your entire model.
-
-    # Note on using dropout with TensorFlow
-        When using the TensorFlow backend, specify a fixed batch size for your model
-        following the notes on statefulness RNNs.
-    '''
-    def __init__(self, incoming,
-                 weights=None,
-                 return_sequences=True, go_backwards=False, stateful=False,
-                 unroll=False, consume_less='cpu',
-                 input_dim=None, input_length=None, **kwargs):
-        self.return_sequences = return_sequences
-        self.initial_weights = weights
-        self.go_backwards = go_backwards
-        self.stateful = stateful
-        self.unroll = unroll
-        self.consume_less = consume_less
-
-        self.supports_masking = True
-        self.input_spec = [InputSpec(ndim=3)]
-        self.input_dim = input_dim
-        self.input_length = input_length
-        if self.input_dim:
-            kwargs['input_shape'] = (self.input_length, self.input_dim)
-        super(Recurrent, self).__init__(**kwargs)
-        self.kwargs = kwargs    # [DV] add for additional input of RNN
-
-    def get_output_shape_for(self, input_shape):
-        if self.return_sequences:
-            return (input_shape[0], input_shape[1], self.output_dim)
-        else:
-            return (input_shape[0], self.output_dim)
-
-    def compute_mask(self, input, mask):
-        if self.return_sequences:
-            return mask
-        else:
-            return None
-
-    def step(self, x, states):
-        raise NotImplementedError
-
-    def get_constants(self, x):
-        return []
-
-    def get_initial_states(self, x):
-        # build an all-zero tensor of shape (samples, output_dim)
-        initial_state = K.zeros_like(x)  # (samples, timesteps, input_dim)
-        initial_state = K.sum(initial_state, axis=(1, 2))  # (samples,)
-        initial_state = K.expand_dims(initial_state)  # (samples, 1)
-        initial_state = K.tile(initial_state, [1, self.output_dim])  # (samples, output_dim)
-        initial_states = [initial_state for _ in range(len(self.states))]
-        return initial_states
-
-    def preprocess_input(self, x):
-        return x
-
-    def call(self, x, mask=None):
-        # input shape: (nb_samples, time (padded with zeros), input_dim)
-        # note that the .build() method of subclasses MUST define
-        # self.input_spec with a complete input shape.
-        input_shape = self.input_spec[0].shape
-        if K._BACKEND == 'tensorflow':
-            if not input_shape[1]:
-                raise Exception('When using TensorFlow, you should define '
-                                'explicitly the number of timesteps of '
-                                'your sequences.\n'
-                                'If your first layer is an Embedding, '
-                                'make sure to pass it an "input_length" '
-                                'argument. Otherwise, make sure '
-                                'the first layer has '
-                                'an "input_shape" or "batch_input_shape" '
-                                'argument, including the time axis. '
-                                'Found input shape at layer ' + self.name +
-                                ': ' + str(input_shape))
-        if self.stateful:
-            initial_states = self.states
-        else:
-            initial_states = self.get_initial_states(x)
-        constants = self.get_constants(x)
-        preprocessed_input = self.preprocess_input(x)
-
-        last_output, outputs, states = K.rnn(self.step, preprocessed_input,
-                                             initial_states,
-                                             go_backwards=self.go_backwards,
-                                             mask=mask,
-                                             constants=constants,
-                                             unroll=self.unroll,
-                                             input_length=input_shape[1])
-        if self.stateful:
-            self.updates = []
-            for i in range(len(states)):
-                self.updates.append((self.states[i], states[i]))
-
-        if self.return_sequences:                    # [DV] add 'keep_time_order' param for backward RNN
-            if self.go_backwards == True and 'keep_time_order' in self.kwargs and self.kwargs['keep_time_order'] == True:
-                return outputs[:,::-1,:]
-            else:
-                return outputs
-        else:
-            return last_output
-
-    def get_config(self):
-        config = {'return_sequences': self.return_sequences,
-                  'go_backwards': self.go_backwards,
-                  'stateful': self.stateful,
-                  'unroll': self.unroll,
-                  'consume_less': self.consume_less}
-        if self.stateful:
-            config['batch_input_shape'] = self.input_spec[0].shape
-        else:
-            config['input_dim'] = self.input_dim
-            config['input_length'] = self.input_length
-
-        base_config = super(Recurrent, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-class SimpleRNN(Recurrent):
-    '''Fully-connected RNN where the output is to be fed back to input.
-
-    # Arguments
-        output_dim: dimension of the internal projections and the final output.
-        init: weight initialization function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [initializations](../initializations.md)).
-        inner_init: initialization function of the inner cells.
-        activation: activation function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [activations](../activations.md)).
-        W_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the input weights matrices.
-        U_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the recurrent weights matrices.
-        b_regularizer: instance of [WeightRegularizer](../regularizers.md),
-            applied to the bias.
-        dropout_W: float between 0 and 1. Fraction of the input units to drop for input gates.
-        dropout_U: float between 0 and 1. Fraction of the input units to drop for recurrent connections.
-
-    # References
-        - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
-    '''
-    def __init__(self, output_dim,
-                 init='glorot_uniform', inner_init='orthogonal',
-                 activation='tanh',
-                 W_regularizer=None, U_regularizer=None, b_regularizer=None,
-                 dropout_W=0., dropout_U=0., **kwargs):
-        self.output_dim = output_dim
-        self.init = initializations.get(init)
-        self.inner_init = initializations.get(inner_init)
-        self.activation = activations.get(activation)
-        self.W_regularizer = regularizers.get(W_regularizer)
-        self.U_regularizer = regularizers.get(U_regularizer)
-        self.b_regularizer = regularizers.get(b_regularizer)
-        self.dropout_W, self.dropout_U = dropout_W, dropout_U
-
-        if self.dropout_W or self.dropout_U:
-            self.uses_learning_phase = True
-        super(SimpleRNN, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.input_spec = [InputSpec(shape=input_shape)]
-        if self.stateful:
-            self.reset_states()
-        else:
-            # initial states: all-zero tensor of shape (output_dim)
-            self.states = [None]
-        input_dim = input_shape[2]
-        self.input_dim = input_dim
-
-        self.W = self.init((input_dim, self.output_dim),
-                           name='{}_W'.format(self.name))
-        self.U = self.inner_init((self.output_dim, self.output_dim),
-                                 name='{}_U'.format(self.name))
-        self.b = K.zeros((self.output_dim,), name='{}_b'.format(self.name))
-
-        self.regularizers = []
-        if self.W_regularizer:
-            self.W_regularizer.set_param(self.W)
-            self.regularizers.append(self.W_regularizer)
-        if self.U_regularizer:
-            self.U_regularizer.set_param(self.U)
-            self.regularizers.append(self.U_regularizer)
-        if self.b_regularizer:
-            self.b_regularizer.set_param(self.b)
-            self.regularizers.append(self.b_regularizer)
-
-        self.trainable_weights = [self.W, self.U, self.b]
-
-        if self.initial_weights is not None:
-            self.set_weights(self.initial_weights)
-            del self.initial_weights
-
-    def reset_states(self):
-        assert self.stateful, 'Layer must be stateful.'
-        input_shape = self.input_spec[0].shape
-        if not input_shape[0]:
-            raise Exception('If a RNN is stateful, a complete ' +
-                            'input_shape must be provided (including batch size).')
-        if hasattr(self, 'states'):
-            K.set_value(self.states[0],
-                        np.zeros((input_shape[0], self.output_dim)))
-        else:
-            self.states = [K.zeros((input_shape[0], self.output_dim))]
-
-    def preprocess_input(self, x):
-        if self.consume_less == 'cpu':
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[2]
-            timesteps = input_shape[1]
-            return time_distributed_dense(x, self.W, self.b, self.dropout_W,
-                                          input_dim, self.output_dim,
-                                          timesteps)
-        else:
-            return x
-
-    def step(self, x, states):
-        prev_output = states[0]
-        B_U = states[1]
-        B_W = states[2]
-
-        if self.consume_less == 'cpu':
-            h = x
-        else:
-            h = K.dot(x * B_W, self.W) + self.b
-
-        output = self.activation(h + K.dot(prev_output * B_U, self.U))
-        return output, [output]
-
-    def get_constants(self, x):
-        constants = []
-        if 0 < self.dropout_U < 1:
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * self.output_dim, 1)
-            B_U = K.in_train_phase(K.dropout(ones, self.dropout_U), ones)
-            constants.append(B_U)
-        else:
-            constants.append(K.cast_to_floatx(1.))
-        if self.consume_less == 'cpu' and 0 < self.dropout_W < 1:
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[-1]
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * input_dim, 1)
-            B_W = K.in_train_phase(K.dropout(ones, self.dropout_W), ones)
-            constants.append(B_W)
-        else:
-            constants.append(K.cast_to_floatx(1.))
-        return constants
-
-    def get_config(self):
-        config = {'output_dim': self.output_dim,
-                  'init': self.init.__name__,
-                  'inner_init': self.inner_init.__name__,
-                  'activation': self.activation.__name__,
-                  'W_regularizer': self.W_regularizer.get_config() if self.W_regularizer else None,
-                  'U_regularizer': self.U_regularizer.get_config() if self.U_regularizer else None,
-                  'b_regularizer': self.b_regularizer.get_config() if self.b_regularizer else None,
-                  'dropout_W': self.dropout_W,
-                  'dropout_U': self.dropout_U}
-        base_config = super(SimpleRNN, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-class GRU(Recurrent):
-    '''Gated Recurrent Unit - Cho et al. 2014.
-
-    # Arguments
-        output_dim: dimension of the internal projections and the final output.
-        init: weight initialization function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [initializations](../initializations.md)).
-        inner_init: initialization function of the inner cells.
-        activation: activation function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [activations](../activations.md)).
-        inner_activation: activation function for the inner cells.
-        W_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the input weights matrices.
-        U_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the recurrent weights matrices.
-        b_regularizer: instance of [WeightRegularizer](../regularizers.md),
-            applied to the bias.
-        dropout_W: float between 0 and 1. Fraction of the input units to drop for input gates.
-        dropout_U: float between 0 and 1. Fraction of the input units to drop for recurrent connections.
-
-    # References
-        - [On the Properties of Neural Machine Translation: Encoder–Decoder Approaches](http://www.aclweb.org/anthology/W14-4012)
-        - [Empirical Evaluation of Gated Recurrent Neural Networks on Sequence Modeling](http://arxiv.org/pdf/1412.3555v1.pdf)
-        - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
-    '''
-    def __init__(self, output_dim,
-                 init='glorot_uniform', inner_init='orthogonal',
-                 activation='tanh', inner_activation='hard_sigmoid',
-                 W_regularizer=None, U_regularizer=None, b_regularizer=None,
-                 dropout_W=0., dropout_U=0., **kwargs):
-        self.output_dim = output_dim
-        self.init = initializations.get(init)
-        self.inner_init = initializations.get(inner_init)
-        self.activation = activations.get(activation)
-        self.inner_activation = activations.get(inner_activation)
-        self.W_regularizer = regularizers.get(W_regularizer)
-        self.U_regularizer = regularizers.get(U_regularizer)
-        self.b_regularizer = regularizers.get(b_regularizer)
-        self.dropout_W, self.dropout_U = dropout_W, dropout_U
-
-        if self.dropout_W or self.dropout_U:
-            self.uses_learning_phase = True
-        super(GRU, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.input_spec = [InputSpec(shape=input_shape)]
-        self.input_dim = input_shape[2]
-
-        if self.stateful:
-            self.reset_states()
-        else:
-            # initial states: all-zero tensor of shape (output_dim)
-            self.states = [None]
-
-        if self.consume_less == 'gpu':
-
-            self.W = self.init((self.input_dim, 3 * self.output_dim),
-                               name='{}_W'.format(self.name))
-            self.U = self.inner_init((self.output_dim, 3 * self.output_dim),
-                                     name='{}_U'.format(self.name))
-
-            self.b = K.variable(np.hstack((np.zeros(self.output_dim),
-                                           np.zeros(self.output_dim),
-                                           np.zeros(self.output_dim))),
-                                name='{}_b'.format(self.name))
-
-            self.trainable_weights = [self.W, self.U, self.b]
-        else:
-
-            self.W_z = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_z'.format(self.name))
-            self.U_z = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_z'.format(self.name))
-            self.b_z = K.zeros((self.output_dim,), name='{}_b_z'.format(self.name))
-
-            self.W_r = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_r'.format(self.name))
-            self.U_r = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_r'.format(self.name))
-            self.b_r = K.zeros((self.output_dim,), name='{}_b_r'.format(self.name))
-
-            self.W_h = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_h'.format(self.name))
-            self.U_h = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_h'.format(self.name))
-            self.b_h = K.zeros((self.output_dim,), name='{}_b_h'.format(self.name))
-
-            self.trainable_weights = [self.W_z, self.U_z, self.b_z,
-                                      self.W_r, self.U_r, self.b_r,
-                                      self.W_h, self.U_h, self.b_h]
-
-            self.W = tensor.concatenate([self.W_z, self.W_r, self.W_h])
-            self.U = tensor.concatenate([self.U_z, self.U_r, self.U_h])
-            self.b = tensor.concatenate([self.b_z, self.b_r, self.b_h])
-
-        self.regularizers = []
-        if self.W_regularizer:
-            self.W_regularizer.set_param(self.W)
-            self.regularizers.append(self.W_regularizer)
-        if self.U_regularizer:
-            self.U_regularizer.set_param(self.U)
-            self.regularizers.append(self.U_regularizer)
-        if self.b_regularizer:
-            self.b_regularizer.set_param(self.b)
-            self.regularizers.append(self.b_regularizer)
-
-        if self.initial_weights is not None:
-            self.set_weights(self.initial_weights)
-            del self.initial_weights
-
-    def reset_states(self):
-        assert self.stateful, 'Layer must be stateful.'
-        input_shape = self.input_spec[0].shape
-        if not input_shape[0]:
-            raise Exception('If a RNN is stateful, a complete ' +
-                            'input_shape must be provided (including batch size).')
-        if hasattr(self, 'states'):
-            K.set_value(self.states[0],
-                        np.zeros((input_shape[0], self.output_dim)))
-        else:
-            self.states = [K.zeros((input_shape[0], self.output_dim))]
-
-    def preprocess_input(self, x):
-        if self.consume_less == 'cpu':
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[2]
-            timesteps = input_shape[1]
-
-            x_z = time_distributed_dense(x, self.W_z, self.b_z, self.dropout_W,
-                                         input_dim, self.output_dim, timesteps)
-            x_r = time_distributed_dense(x, self.W_r, self.b_r, self.dropout_W,
-                                         input_dim, self.output_dim, timesteps)
-            x_h = time_distributed_dense(x, self.W_h, self.b_h, self.dropout_W,
-                                         input_dim, self.output_dim, timesteps)
-            return tensor.concatenate([x_z, x_r, x_h], axis=2)
-        else:
-            return x
-
-    def step(self, x, states):
-        h_tm1 = states[0]  # previous memory
-        B_U = states[1]  # dropout matrices for recurrent units
-        B_W = states[2]
-
-        if self.consume_less == 'gpu':
-
-            matrix_x = K.dot(x * B_W[0], self.W) + self.b
-            matrix_inner = K.dot(h_tm1 * B_U[0], self.U[:, :2 * self.output_dim])
-
-            x_z = matrix_x[:, :self.output_dim]
-            x_r = matrix_x[:, self.output_dim: 2 * self.output_dim]
-            inner_z = matrix_inner[:, :self.output_dim]
-            inner_r = matrix_inner[:, self.output_dim: 2 * self.output_dim]
-
-            z = self.inner_activation(x_z + inner_z)
-            r = self.inner_activation(x_r + inner_r)
-
-            x_h = matrix_x[:, 2 * self.output_dim:]
-            inner_h = K.dot(r * h_tm1 * B_U[0], self.U[:, 2 * self.output_dim:])
-            hh = self.activation(x_h + inner_h)
-        else:
-            if self.consume_less == 'cpu':
-                x_z = x[:, :self.output_dim]
-                x_r = x[:, self.output_dim: 2 * self.output_dim]
-                x_h = x[:, 2 * self.output_dim:]
-            elif self.consume_less == 'mem':
-                x_z = K.dot(x * B_W[0], self.W_z) + self.b_z
-                x_r = K.dot(x * B_W[1], self.W_r) + self.b_r
-                x_h = K.dot(x * B_W[2], self.W_h) + self.b_h
-            else:
-                raise Exception('Unknown `consume_less` mode.')
-            z = self.inner_activation(x_z + K.dot(h_tm1 * B_U[0], self.U_z))
-            r = self.inner_activation(x_r + K.dot(h_tm1 * B_U[1], self.U_r))
-
-            hh = self.activation(x_h + K.dot(r * h_tm1 * B_U[2], self.U_h))
-        h = z * h_tm1 + (1 - z) * hh
-        return h, [h]
-
-    def get_constants(self, x):
-        constants = []
-        if 0 < self.dropout_U < 1:
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * self.output_dim, 1)
-            B_U = [K.in_train_phase(K.dropout(ones, self.dropout_U), ones) for _ in range(3)]
-            constants.append(B_U)
-        else:
-            constants.append([K.cast_to_floatx(1.) for _ in range(3)])
-
-        if 0 < self.dropout_W < 1:
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[-1]
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * input_dim, 1)
-            B_W = [K.in_train_phase(K.dropout(ones, self.dropout_W), ones) for _ in range(3)]
-            constants.append(B_W)
-        else:
-            constants.append([K.cast_to_floatx(1.) for _ in range(3)])
-        return constants
-
-    def get_config(self):
-        config = {'output_dim': self.output_dim,
-                  'init': self.init.__name__,
-                  'inner_init': self.inner_init.__name__,
-                  'activation': self.activation.__name__,
-                  'inner_activation': self.inner_activation.__name__,
-                  'W_regularizer': self.W_regularizer.get_config() if self.W_regularizer else None,
-                  'U_regularizer': self.U_regularizer.get_config() if self.U_regularizer else None,
-                  'b_regularizer': self.b_regularizer.get_config() if self.b_regularizer else None,
-                  'dropout_W': self.dropout_W,
-                  'dropout_U': self.dropout_U}
-        base_config = super(GRU, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-class LSTMLayer(MergeLayer):
-    '''Long-Short Term Memory unit - Hochreiter 1997.
-
-    For a step-by-step description of the algorithm, see
-    [this tutorial](http://deeplearning.net/tutorial/lstm.html).
-
-    # Arguments
-        output_dim: dimension of the internal projections and the final output.
-        init: weight initialization function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [initializations](../initializations.md)).
-        inner_init: initialization function of the inner cells.
-        forget_bias_init: initialization function for the bias of the forget gate.
-            [Jozefowicz et al.](http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf)
-            recommend initializing with ones.
-        activation: activation function.
-            Can be the name of an existing function (str),
-            or a Theano function (see: [activations](../activations.md)).
-        inner_activation: activation function for the inner cells.
-        W_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the input weights matrices.
-        U_regularizer: instance of [WeightRegularizer](../regularizers.md)
-            (eg. L1 or L2 regularization), applied to the recurrent weights matrices.
-        b_regularizer: instance of [WeightRegularizer](../regularizers.md),
-            applied to the bias.
-        dropout_W: float between 0 and 1. Fraction of the input units to drop for input gates.
-        dropout_U: float between 0 and 1. Fraction of the input units to drop for recurrent connections.
-
-    # References
-        - [Long short-term memory](http://deeplearning.cs.cmu.edu/pdfs/Hochreiter97_lstm.pdf) (original 1997 paper)
-        - [Learning to forget: Continual prediction with LSTM](http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015)
-        - [Supervised sequence labelling with recurrent neural networks](http://www.cs.toronto.edu/~graves/preprint.pdf)
-        - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
-    '''
-    def __init__(self, incoming, output_dim, stateful=False,
-                 init='glorot_uniform', inner_init='orthogonal',
-                 forget_bias_init='one', activation='tanh',
-                 inner_activation='hard_sigmoid',
-                 W_regularizer=None, U_regularizer=None, b_regularizer=None,
-                 dropout_W=0., dropout_U=0.,
-                 mask_input=None,
-                 hid_init=init.Constant(0.),
+import theano
+import theano.tensor as T
+
+import lasagne
+from lasagne import nonlinearities
+from lasagne import init
+from lasagne.utils import unroll_scan
+
+from lasagne.layers.base import MergeLayer, Layer
+from lasagne.layers.recurrent import Gate
+
+
+class PLSTMTimeGate(object):
+    """
+    """
+    def __init__(self,
+                 Period=init.Uniform((10,100)),
+                 Shift=init.Uniform( (0., 1000.)),
+                 On_End=init.Constant(0.05)):
+        self.Period = Period
+        self.Shift = Shift
+        self.On_End = On_End
+
+class PLSTMLayer(MergeLayer):
+    r"""
+    """
+    # GATE defaults: W_in=init.Normal(0.1), W_hid=init.Normal(0.1), W_cell=init.Normal(0.1), b=init.Constant(0.), nonlinearity=nonlinearities.sigmoid
+    def __init__(self, incoming, time_input, num_units,
+                 ingate=Gate(b=lasagne.init.Constant(0)),
+                 forgetgate=Gate(b=lasagne.init.Constant(2), nonlinearity=nonlinearities.sigmoid),
+                 timegate=PLSTMTimeGate(),
+                 cell=Gate(W_cell=None, nonlinearity=nonlinearities.tanh),
+                 outgate=Gate(),
+                 nonlinearity=nonlinearities.tanh,
                  cell_init=init.Constant(0.),
+                 hid_init=init.Constant(0.),
+                 backwards=False,
+                 learn_init=False,
+                 peepholes=True,
+                 gradient_steps=-1,
+                 grad_clipping=0,
+                 unroll_scan=False,
+                 precompute_input=True,
+                 mask_input=None,
+                 only_return_final=False,
+                 bn=False,
+                 learn_time_params=[True, True, False],
+                 off_alpha=1e-3,
                  **kwargs):
 
+        # This layer inherits from a MergeLayer, because it can have four
+        # inputs - the layer input, the mask, the initial hidden state and the
+        # inital cell state. We will just provide the layer input as incomings,
+        # unless a mask input, inital hidden state or initial cell state was
+        # provided.
         incomings = [incoming]
-        self.mask_incoming_index = -1
-        self.hid_init_incoming_index = -1
-        self.cell_init_incoming_index = -1
+        # TIME STUFF
+        incomings.append(time_input)
+        self.time_incoming_index = len(incomings)-1
+
+        self.mask_incoming_index = -2
+        self.hid_init_incoming_index = -2
+        self.cell_init_incoming_index = -2
+        #ADD TIME INPUT HERE
         if mask_input is not None:
             incomings.append(mask_input)
             self.mask_incoming_index = len(incomings)-1
@@ -679,190 +74,379 @@ class LSTMLayer(MergeLayer):
             incomings.append(cell_init)
             self.cell_init_incoming_index = len(incomings)-1
 
-        self.output_dim = output_dim
-        self.init = initializations.get(init)
-        self.inner_init = initializations.get(inner_init)
-        self.forget_bias_init = initializations.get(forget_bias_init)
-        self.activation = activations.get(activation)
-        self.inner_activation = activations.get(inner_activation)
-        self.W_regularizer = regularizers.get(W_regularizer)
-        self.U_regularizer = regularizers.get(U_regularizer)
-        self.b_regularizer = regularizers.get(b_regularizer)
-        self.dropout_W, self.dropout_U = dropout_W, dropout_U
-        self.stateful=stateful
-
-        if self.dropout_W or self.dropout_U:
-            self.uses_learning_phase = True
         # Initialize parent layer
-        super(LSTMLayer, self).__init__(incomings, **kwargs)
+        super(PLSTMLayer, self).__init__(incomings, **kwargs)
 
-    def build(self, input_shape):
-        self.input_dim = input_shape[2]
-
-        if self.stateful:
-            self.reset_states()
+        # If the provided nonlinearity is None, make it linear
+        if nonlinearity is None:
+            self.nonlinearity = nonlinearities.identity
         else:
-            # initial states: 2 all-zero tensors of shape (output_dim)
-            self.states = [None, None]
+            self.nonlinearity = nonlinearity
 
-        if self.consume_less == 'gpu':
-            self.W = self.init((self.input_dim, 4 * self.output_dim),
-                               name='{}_W'.format(self.name))
-            self.U = self.inner_init((self.output_dim, 4 * self.output_dim),
-                                     name='{}_U'.format(self.name))
+        self.learn_init = learn_init
+        self.num_units = num_units
+        self.backwards = backwards
+        self.peepholes = peepholes
+        self.gradient_steps = gradient_steps
+        self.grad_clipping = grad_clipping
+        self.unroll_scan = unroll_scan
+        self.precompute_input = precompute_input
+        self.only_return_final = only_return_final
 
-            self.b = variable(np.hstack((np.zeros(self.output_dim),
-                                           K.get_value(self.forget_bias_init((self.output_dim,))),  #Todo: seems K.get_value() is a bug here
-                                           np.zeros(self.output_dim),
-                                           np.zeros(self.output_dim))),
-                                name='{}_b'.format(self.name))
-            self.trainable_weights = [self.W, self.U, self.b]
+        if unroll_scan and gradient_steps != -1:
+            raise ValueError(
+                "Gradient steps must be -1 when unroll_scan is true.")
+
+        # Retrieve the dimensionality of the incoming layer
+        input_shape = self.input_shapes[0]
+        time_shape = self.input_shapes[1]
+
+
+        if unroll_scan and input_shape[1] is None:
+            raise ValueError("Input sequence length cannot be specified as "
+                             "None when unroll_scan is True")
+
+        num_inputs = np.prod(input_shape[2:])
+
+        def add_gate_params(gate, gate_name):
+            """ Convenience function for adding layer parameters from a Gate
+            instance. """
+            return (self.add_param(gate.W_in, (num_inputs, num_units),
+                                   name="W_in_to_{}".format(gate_name)),
+                    self.add_param(gate.W_hid, (num_units, num_units),
+                                   name="W_hid_to_{}".format(gate_name)),
+                    self.add_param(gate.b, (num_units,),
+                                   name="b_{}".format(gate_name),
+                                   regularizable=False),
+                gate.nonlinearity)
+
+        # PHASED LSTM: Initialize params for the time gate
+        self.off_alpha = off_alpha
+        if timegate == None:
+            timegate = PLSTMTimeGate()
+        def add_timegate_params(gate, gate_name):
+            """ Convenience function for adding layer parameters from a Gate
+            instance. """
+            return (self.add_param(gate.Period, (num_units, ),
+                                   name="Period_{}".format(gate_name),
+                                   trainable=learn_time_params[0]),
+                    self.add_param(gate.Shift, (num_units, ),
+                                   name="Shift_{}".format(gate_name),
+                                   trainable=learn_time_params[1]),
+                    self.add_param(gate.On_End, (num_units, ),
+                                   name="On_End_{}".format(gate_name),
+                                   trainable=learn_time_params[2]))
+        print('Learnableness: {}'.format(learn_time_params))
+        (self.period_timegate, self.shift_timegate,
+         self.on_end_timegate) = add_timegate_params(timegate, 'timegate')
+
+        # Add in parameters from the supplied Gate instances
+        (self.W_in_to_ingate, self.W_hid_to_ingate, self.b_ingate,
+         self.nonlinearity_ingate) = add_gate_params(ingate, 'ingate')
+
+        (self.W_in_to_forgetgate, self.W_hid_to_forgetgate, self.b_forgetgate,
+         self.nonlinearity_forgetgate) = add_gate_params(forgetgate,
+                                                         'forgetgate')
+
+        (self.W_in_to_cell, self.W_hid_to_cell, self.b_cell,
+         self.nonlinearity_cell) = add_gate_params(cell, 'cell')
+
+        (self.W_in_to_outgate, self.W_hid_to_outgate, self.b_outgate,
+         self.nonlinearity_outgate) = add_gate_params(outgate, 'outgate')
+
+        # If peephole (cell to gate) connections were enabled, initialize
+        # peephole connections.  These are elementwise products with the cell
+        # state, so they are represented as vectors.
+        if self.peepholes:
+            self.W_cell_to_ingate = self.add_param(
+                ingate.W_cell, (num_units, ), name="W_cell_to_ingate")
+
+            self.W_cell_to_forgetgate = self.add_param(
+                forgetgate.W_cell, (num_units, ), name="W_cell_to_forgetgate")
+
+            self.W_cell_to_outgate = self.add_param(
+                outgate.W_cell, (num_units, ), name="W_cell_to_outgate")
+
+        # Setup initial values for the cell and the hidden units
+        if isinstance(cell_init, Layer):
+            self.cell_init = cell_init
         else:
-            self.W_i = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_i'.format(self.name))
-            self.U_i = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_i'.format(self.name))
-            self.b_i = variable(np.zeros((self.output_dim,), dtype='float32'), name='{}_b_i'.format(self.name))
+            self.cell_init = self.add_param(
+                cell_init, (1, num_units), name="cell_init",
+                trainable=learn_init, regularizable=False)
 
-            self.W_f = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_f'.format(self.name))
-            self.U_f = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_f'.format(self.name))
-            self.b_f = self.forget_bias_init((self.output_dim,),
-                                             name='{}_b_f'.format(self.name))
-
-            self.W_c = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_c'.format(self.name))
-            self.U_c = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_c'.format(self.name))
-            self.b_c = variable(np.zeros((self.output_dim,), dtype='float32'), name='{}_b_c'.format(self.name))
-
-            self.W_o = self.init((self.input_dim, self.output_dim),
-                                 name='{}_W_o'.format(self.name))
-            self.U_o = self.inner_init((self.output_dim, self.output_dim),
-                                       name='{}_U_o'.format(self.name))
-            self.b_o = variable(np.zeros((self.output_dim,), dtype='float32'), name='{}_b_o'.format(self.name))
-
-            self.trainable_weights = [self.W_i, self.U_i, self.b_i,
-                                      self.W_c, self.U_c, self.b_c,
-                                      self.W_f, self.U_f, self.b_f,
-                                      self.W_o, self.U_o, self.b_o]
-
-            self.W = tensor.concatenate([self.W_i, self.W_f, self.W_c, self.W_o])
-            self.U = tensor.concatenate([self.U_i, self.U_f, self.U_c, self.U_o])
-            self.b = tensor.concatenate([self.b_i, self.b_f, self.b_c, self.b_o])
-
-        self.regularizers = []
-        if self.W_regularizer:
-            self.W_regularizer.set_param(self.W)
-            self.regularizers.append(self.W_regularizer)
-        if self.U_regularizer:
-            self.U_regularizer.set_param(self.U)
-            self.regularizers.append(self.U_regularizer)
-        if self.b_regularizer:
-            self.b_regularizer.set_param(self.b)
-            self.regularizers.append(self.b_regularizer)
-
-        if self.initial_weights is not None:
-            self.set_weights(self.initial_weights)
-            del self.initial_weights
-
-    def reset_states(self):
-        assert self.stateful, 'Layer must be stateful.'
-        input_shape = self.input_spec[0].shape
-        if not input_shape[0]:
-            raise Exception('If a RNN is stateful, a complete ' +
-                            'input_shape must be provided (including batch size).')
-        if hasattr(self, 'states'):
-            K.set_value(self.states[0],
-                        np.zeros((input_shape[0], self.output_dim)))
-            K.set_value(self.states[1],
-                        np.zeros((input_shape[0], self.output_dim)))
+        if isinstance(hid_init, Layer):
+            self.hid_init = hid_init
         else:
-            self.states = [K.zeros((input_shape[0], self.output_dim)),
-                           K.zeros((input_shape[0], self.output_dim))]
+            self.hid_init = self.add_param(
+                hid_init, (1, self.num_units), name="hid_init",
+                trainable=learn_init, regularizable=False)
 
-    def preprocess_input(self, x):
-        if self.consume_less == 'cpu':
-            if 0 < self.dropout_W < 1:
-                dropout = self.dropout_W
-            else:
-                dropout = 0
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[2]
-            timesteps = input_shape[1]
-
-            x_i = time_distributed_dense(x, self.W_i, self.b_i, dropout,
-                                         input_dim, self.output_dim, timesteps)
-            x_f = time_distributed_dense(x, self.W_f, self.b_f, dropout,
-                                         input_dim, self.output_dim, timesteps)
-            x_c = time_distributed_dense(x, self.W_c, self.b_c, dropout,
-                                         input_dim, self.output_dim, timesteps)
-            x_o = time_distributed_dense(x, self.W_o, self.b_o, dropout,
-                                         input_dim, self.output_dim, timesteps)
-            return tensor.concatenate([x_i, x_f, x_c, x_o], axis=2)
+        if bn:
+            self.bn = lasagne.layers.BatchNormLayer(input_shape, axes=(0,1))  # create BN layer for correct input shape
+            self.params.update(self.bn.params)  # make BN params your params
         else:
-            return x
+            self.bn = False
 
-    def step(self, x, states):
-        h_tm1 = states[0]
-        c_tm1 = states[1]
-        B_U = states[2]
-        B_W = states[3]
-
-        if self.consume_less == 'gpu':
-            z = K.dot(x * B_W[0], self.W) + K.dot(h_tm1 * B_U[0], self.U) + self.b
-
-            z0 = z[:, :self.output_dim]
-            z1 = z[:, self.output_dim: 2 * self.output_dim]
-            z2 = z[:, 2 * self.output_dim: 3 * self.output_dim]
-            z3 = z[:, 3 * self.output_dim:]
-
-            i = self.inner_activation(z0)
-            f = self.inner_activation(z1)
-            c = f * c_tm1 + i * self.activation(z2)
-            o = self.inner_activation(z3)
+    def get_output_shape_for(self, input_shapes):
+        # The shape of the input to this layer will be the first element
+        # of input_shapes, whether or not a mask input is being used.
+        input_shape = input_shapes[0]
+        # When only_return_final is true, the second (sequence step) dimension
+        # will be flattened
+        if self.only_return_final:
+            return input_shape[0], self.num_units
+        # Otherwise, the shape will be (n_batch, n_steps, num_units)
         else:
-            if self.consume_less == 'cpu':
-                x_i = x[:, :self.output_dim]
-                x_f = x[:, self.output_dim: 2 * self.output_dim]
-                x_c = x[:, 2 * self.output_dim: 3 * self.output_dim]
-                x_o = x[:, 3 * self.output_dim:]
-            elif self.consume_less == 'mem':
-                x_i = K.dot(x * B_W[0], self.W_i) + self.b_i
-                x_f = K.dot(x * B_W[1], self.W_f) + self.b_f
-                x_c = K.dot(x * B_W[2], self.W_c) + self.b_c
-                x_o = K.dot(x * B_W[3], self.W_o) + self.b_o
-            else:
-                raise Exception('Unknown `consume_less` mode.')
+            return input_shape[0], input_shape[1], self.num_units
 
-            i = self.inner_activation(x_i + K.dot(h_tm1 * B_U[0], self.U_i))
-            f = self.inner_activation(x_f + K.dot(h_tm1 * B_U[1], self.U_f))
-            c = f * c_tm1 + i * self.activation(x_c + K.dot(h_tm1 * B_U[2], self.U_c))
-            o = self.inner_activation(x_o + K.dot(h_tm1 * B_U[3], self.U_o))
+    def get_output_for(self, inputs, deterministic=False, **kwargs):
+        """
+        Compute this layer's output function given a symbolic input variable
+        Parameters
+        ----------
+        inputs : list of theano.TensorType
+            `inputs[0]` should always be the symbolic input variable.  When
+            this layer has a mask input (i.e. was instantiated with
+            `mask_input != None`, indicating that the lengths of sequences in
+            each batch vary), `inputs` should have length 2, where `inputs[1]`
+            is the `mask`.  The `mask` should be supplied as a Theano variable
+            denoting whether each time step in each sequence in the batch is
+            part of the sequence or not.  `mask` should be a matrix of shape
+            ``(n_batch, n_time_steps)`` where ``mask[i, j] = 1`` when ``j <=
+            (length of sequence i)`` and ``mask[i, j] = 0`` when ``j > (length
+            of sequence i)``. When the hidden state of this layer is to be
+            pre-filled (i.e. was set to a :class:`Layer` instance) `inputs`
+            should have length at least 2, and `inputs[-1]` is the hidden state
+            to prefill with. When the cell state of this layer is to be
+            pre-filled (i.e. was set to a :class:`Layer` instance) `inputs`
+            should have length at least 2, and `inputs[-1]` is the hidden state
+            to prefill with. When both the cell state and the hidden state are
+            being pre-filled `inputs[-2]` is the hidden state, while
+            `inputs[-1]` is the cell state.
+        Returns
+        -------
+        layer_output : theano.TensorType
+            Symbolic output variable.
+        """
+        # Retrieve the layer input
+        input = inputs[0]
+        # Retrieve the mask when it is supplied
+        mask = None
+        hid_init = None
+        cell_init = None
+        if self.mask_incoming_index > 0:
+            mask = inputs[self.mask_incoming_index]
+        if self.hid_init_incoming_index > 0:
+            hid_init = inputs[self.hid_init_incoming_index]
+        if self.cell_init_incoming_index > 0:
+            cell_init = inputs[self.cell_init_incoming_index]
 
-        h = o * self.activation(c)
-        return h, [h, c]
+        # PHASED LSTM: Define new input
+        time_mat = inputs[self.time_incoming_index]
 
-    def get_constants(self, x):
-        constants = []
-        if 0 < self.dropout_U < 1:
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * self.output_dim, 1)
-            B_U = [K.in_train_phase(K.dropout(ones, self.dropout_U), ones) for _ in range(4)]
-            constants.append(B_U)
+        # Treat all dimensions after the second as flattened feature dimensions
+        if input.ndim > 3:
+            input = T.flatten(input, 3)
+
+        if self.bn:
+            input = self.bn.get_output_for(input)
+
+        # Because scan iterates over the first dimension we dimshuffle to
+        # (n_time_steps, n_batch, n_features)
+        input = input.dimshuffle(1, 0, 2)
+        # PHASED LSTM: Get shapes for time input and rearrange for the scan fn
+        time_input = time_mat.dimshuffle(1,0)
+        time_seq_len, time_num_batch = time_input.shape
+        seq_len, num_batch, _ = input.shape
+
+        # Stack input weight matrices into a (num_inputs, 4*num_units)
+        # matrix, which speeds up computation
+        W_in_stacked = T.concatenate(
+            [self.W_in_to_ingate, self.W_in_to_forgetgate,
+             self.W_in_to_cell, self.W_in_to_outgate], axis=1)
+
+        # Same for hidden weight matrices
+        W_hid_stacked = T.concatenate(
+            [self.W_hid_to_ingate, self.W_hid_to_forgetgate,
+             self.W_hid_to_cell, self.W_hid_to_outgate], axis=1)
+
+        # Stack biases into a (4*num_units) vector
+        b_stacked = T.concatenate(
+            [self.b_ingate, self.b_forgetgate,
+             self.b_cell, self.b_outgate], axis=0)
+
+        # PHASED LSTM: If test time, off-phase means really shut.
+        if deterministic:
+            print('Using true off for testing.')
+            off_slope = 0.0
         else:
-            constants.append([K.cast_to_floatx(1.) for _ in range(4)])
+            print('Using {} for off_slope.'.format(self.off_alpha))
+            off_slope = self.off_alpha
 
-        if 0 < self.dropout_W < 1:
-            input_shape = self.input_spec[0].shape
-            input_dim = input_shape[-1]
-            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
-            ones = tensor.concatenate([ones] * input_dim, 1)
-            B_W = [K.in_train_phase(K.dropout(ones, self.dropout_W), ones) for _ in range(4)]
-            constants.append(B_W)
+        # PHASED LSTM: Pregenerate broadcast vars.
+        #   Same neuron in different batches has same shift and period.  Also,
+        #   precalculate the middle (on_mid) and end (on_end) of the open-phase
+        #   ramp.
+        shift_broadcast = self.shift_timegate.dimshuffle(['x',0])
+        period_broadcast = T.abs_(self.period_timegate.dimshuffle(['x',0]))
+        on_mid_broadcast = T.abs_(self.on_end_timegate.dimshuffle(['x',0])) * 0.5 * period_broadcast
+        on_end_broadcast = T.abs_(self.on_end_timegate.dimshuffle(['x',0])) * period_broadcast
+
+        if self.precompute_input:
+            # Because the input is given for all time steps, we can
+            # precompute_input the inputs dot weight matrices before scanning.
+            # W_in_stacked is (n_features, 4*num_units). input is then
+            # (n_time_steps, n_batch, 4*num_units).
+            input = T.dot(input, W_in_stacked) + b_stacked
+
+        # At each call to scan, input_n will be (n_time_steps, 4*num_units).
+        # We define a slicing function that extract the input to each LSTM gate
+        def slice_w(x, n):
+            return x[:, n*self.num_units:(n+1)*self.num_units]
+
+        # Create single recurrent computation step function
+        # input_n is the n'th vector of the input
+        def step(input_n, time_input_n, cell_previous, hid_previous, *args):
+            if not self.precompute_input:
+                input_n = T.dot(input_n, W_in_stacked) + b_stacked
+
+            # Calculate gates pre-activations and slice
+            gates = input_n + T.dot(hid_previous, W_hid_stacked)
+
+            # Clip gradients
+            if self.grad_clipping:
+                gates = theano.gradient.grad_clip(
+                    gates, -self.grad_clipping, self.grad_clipping)
+
+            # Extract the pre-activation gate values
+            ingate = slice_w(gates, 0)
+            forgetgate = slice_w(gates, 1)
+            cell_input = slice_w(gates, 2)
+            outgate = slice_w(gates, 3)
+
+            if self.peepholes:
+                # Compute peephole connections
+                ingate += cell_previous*self.W_cell_to_ingate
+                forgetgate += cell_previous*self.W_cell_to_forgetgate
+
+            # Apply nonlinearities
+            ingate = self.nonlinearity_ingate(ingate)
+            forgetgate = self.nonlinearity_forgetgate(forgetgate)
+            cell_input = self.nonlinearity_cell(cell_input)
+
+            # Mix in new stuff
+            cell = forgetgate*cell_previous + ingate*cell_input
+
+            if self.peepholes:
+                outgate += cell*self.W_cell_to_outgate
+            outgate = self.nonlinearity_outgate(outgate)
+
+            # Compute new hidden unit activation
+            hid = outgate*self.nonlinearity(cell)
+            return [cell, hid]
+
+        # PHASED LSTM: The actual calculation of the time gate
+        def calc_time_gate(time_input_n):
+            # Broadcast the time across all units
+            t_broadcast = time_input_n.dimshuffle([0,'x'])
+            # Get the time within the period
+            in_cycle_time = T.mod(t_broadcast + shift_broadcast, period_broadcast)
+            # Find the phase
+            is_up_phase = T.le(in_cycle_time, on_mid_broadcast)
+            is_down_phase = T.gt(in_cycle_time, on_mid_broadcast)*T.le(in_cycle_time, on_end_broadcast)
+            # Set the mask
+            sleep_wake_mask = T.switch(is_up_phase, in_cycle_time/on_mid_broadcast,
+                                T.switch(is_down_phase,
+                                    (on_end_broadcast-in_cycle_time)/on_mid_broadcast,
+                                        off_slope*(in_cycle_time/period_broadcast)))
+
+            return sleep_wake_mask
+
+        # PHASED LSTM: Mask the updates based on the time phase
+        def step_masked(input_n, time_input_n, mask_n, cell_previous, hid_previous, *args):
+            cell, hid = step(input_n, time_input_n, cell_previous, hid_previous, *args)
+
+            # Get time gate openness
+            sleep_wake_mask = calc_time_gate(time_input_n)
+
+            # Sleep if off, otherwise stay a bit on
+            cell = sleep_wake_mask*cell + (1.-sleep_wake_mask)*cell_previous
+            hid = sleep_wake_mask*hid + (1.-sleep_wake_mask)*hid_previous
+
+            # Skip over any input with mask 0 by copying the previous
+            # hidden state; proceed normally for any input with mask 1.
+            cell = T.switch(mask_n, cell, cell_previous)
+            hid = T.switch(mask_n, hid, hid_previous)
+
+            return [cell, hid]
+
+        if mask is not None:
+            # mask is given as (batch_size, seq_len). Because scan iterates
+            # over first dimension, we dimshuffle to (seq_len, batch_size) and
+            # add a broadcastable dimension
+            mask = mask.dimshuffle(1, 0, 'x')
         else:
-            constants.append([K.cast_to_floatx(1.) for _ in range(4)])
-        return constants
+            mask = T.ones_like(time_input).dimshuffle(0,1,'x')
+
+        sequences = [input, time_input, mask]
+        step_fun = step_masked
+
+        ones = T.ones((num_batch, 1))
+        if not isinstance(self.cell_init, Layer):
+            # Dot against a 1s vector to repeat to shape (num_batch, num_units)
+            cell_init = T.dot(ones, self.cell_init)
+
+        if not isinstance(self.hid_init, Layer):
+            # Dot against a 1s vector to repeat to shape (num_batch, num_units)
+            hid_init = T.dot(ones, self.hid_init)
 
 
+        non_seqs = [W_hid_stacked, self.period_timegate, self.shift_timegate, self.on_end_timegate]
+        # The "peephole" weight matrices are only used when self.peepholes=True
+        if self.peepholes:
+            non_seqs += [self.W_cell_to_ingate,
+                         self.W_cell_to_forgetgate,
+                         self.W_cell_to_outgate]
+
+        # When we aren't precomputing the input outside of scan, we need to
+        # provide the input weights and biases to the step function
+        if not self.precompute_input:
+            non_seqs += [W_in_stacked, b_stacked]
+
+        if self.unroll_scan:
+            # Retrieve the dimensionality of the incoming layer
+            input_shape = self.input_shapes[0]
+            # Explicitly unroll the recurrence instead of using scan
+            cell_out, hid_out = unroll_scan(
+                fn=step_fun,
+                sequences=sequences,
+                outputs_info=[cell_init, hid_init],
+                go_backwards=self.backwards,
+                non_sequences=non_seqs,
+                n_steps=input_shape[1])
+        else:
+            # Scan op iterates over first dimension of input and repeatedly
+            # applies the step function
+            cell_out, hid_out = theano.scan(
+                fn=step_fun,
+                sequences=sequences,
+                outputs_info=[cell_init, hid_init],
+                go_backwards=self.backwards,
+                truncate_gradient=self.gradient_steps,
+                non_sequences=non_seqs,
+                strict=True)[0]
+
+        # When it is requested that we only return the final sequence step,
+        # we need to slice it out immediately after scan is applied
+        if self.only_return_final:
+            hid_out = hid_out[-1]
+        else:
+            # dimshuffle back to (n_batch, n_time_steps, n_features))
+            hid_out = hid_out.dimshuffle(1, 0, 2)
+
+            # if scan is backward reverse the output
+            if self.backwards:
+                hid_out = hid_out[:, ::-1]
+
+        return hid_out

@@ -6,6 +6,7 @@ from . import random
 from . import regularization
 from . import updates
 from . import utils
+from . import metrics
 
 
 __version__ = "0.3"

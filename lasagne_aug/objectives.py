@@ -36,7 +36,7 @@ def categorical_crossentropy_log(predictions, targets):
     """
     return theano.tensor.nnet.categorical_crossentropy(predictions, targets)
 
-def ctc_cost_precise(seq, sm, seq_mask=None, sm_mask=None):
+def ctc_cost_precise(seq, sm, seq_mask=None, sm_mask=None, blank_symbol=None):
     """
     seq (B, L), sm (B, T, C+1), seq_mask (B, L), sm_mask (B, T)
     Compute CTC cost, using only the forward pass
@@ -58,9 +58,9 @@ def ctc_cost_precise(seq, sm, seq_mask=None, sm_mask=None):
     else:
         scorematrix_mask = sm_mask.T
 
-    return CTC_precise.cost(queryseq, scorematrix, queryseq_mask, scorematrix_mask)
+    return CTC_precise.cost(queryseq, scorematrix, queryseq_mask, scorematrix_mask, blank_symbol)
 
-def ctc_cost_for_train(seq, sm, seq_mask=None, sm_mask=None):
+def ctc_cost_for_train(seq, sm, seq_mask=None, sm_mask=None, blank_symbol=None):
     """
     seq (B, L), sm (B, T, C+1), seq_mask (B, L), sm_mask (B, T)
     Compute CTC cost, using only the forward pass
@@ -82,9 +82,9 @@ def ctc_cost_for_train(seq, sm, seq_mask=None, sm_mask=None):
     else:
         scorematrix_mask = sm_mask.T
 
-    return CTC_for_train.cost(queryseq, scorematrix, queryseq_mask, scorematrix_mask)
+    return CTC_for_train.cost(queryseq, scorematrix, queryseq_mask, scorematrix_mask, blank_symbol)
 
-def ctc_best_path_decode(Y, Y_mask=None):
+def ctc_best_path_decode(Y, Y_mask=None, blank_symbol=None):
     """
     Decode the network output scorematrix by best-path-decoding scheme
     :param Y: output of a network, with shape (batch, timesteps, Nclass+1)
@@ -96,7 +96,8 @@ def ctc_best_path_decode(Y, Y_mask=None):
         scorematrix_mask = None
     else:
         scorematrix_mask = Y_mask.dimshuffle(1, 0)
-    blank_symbol = Y.shape[2] - 1
+    if blank_symbol is None:
+        blank_symbol = Y.shape[2] - 1
     resultseq, resultseq_mask = CTC_precise.best_path_decode(scorematrix, scorematrix_mask, blank_symbol)
     return resultseq, resultseq_mask
 
