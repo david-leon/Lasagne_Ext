@@ -173,7 +173,7 @@ def print_layer_summary(layer, positions=[.33, .55, .67, 1.]):
     fields = [layer.name + ' (' + layer.__class__.__name__ + ')', output_shape, count_layer_params(layer), parent_layer_name]
     _print_row(fields, positions)
 
-def print_model_summary(model, line_length=100, positions=[.33, .55, .67, 1.]):
+def print_model_summary(model, line_length=120, positions=[.3, .55, .65, 1.]):
     """
     Print model summary, like in Keras model.summary()
     :param model:
@@ -313,12 +313,14 @@ def load_model(filename, model=None, check_layername=True, unwrap_shared=True, *
             layer_idx += 1
         return userdata
 
-def set_weights(model, model_para_values, mapping_dict=None, unwrap_shared=True, **tags):
+def set_weights(model, model_para_values, mapping_dict='auto', unwrap_shared=True, **tags):
     """
-    Set model layers' weights by natural order or 'mapping_dict'
+    Set model layers' weights by 'mapping_dict' or natural order.
+    When 'mapping_dict' is 'auto', then a mapping dict will be built automatically by common layer names between model and
+    model_para_values
     :param model:
     :param model_para_values: list of tuples (name, layer_values)
-    :param mapping_dict: format of {target_layer_name: source_layer_name}
+    :param mapping_dict: {None, 'auto', or dict with format of {target_layer_name: source_layer_name}}
     :param unwrap_shared:
     :param tags:
     :return:
@@ -333,6 +335,18 @@ def set_weights(model, model_para_values, mapping_dict=None, unwrap_shared=True,
             for p, v in zip(layer_params, layer_values):
                 p.set_value(v)
     else:
+        #--- build a mapping dict automatically ---#
+        if mapping_dict == 'auto':
+            target_layer_names = set()
+            source_layer_names = set()
+            for layer in layers:
+                target_layer_names.add(layer.name)
+            for name, _ in model_para_values:
+                source_layer_names.add(name)
+            mapping_dict = dict()
+            for name in target_layer_names & source_layer_names:
+                mapping_dict[name] = name
+        #--- do the mapping ---#
         for target_name in mapping_dict:
             source_name = mapping_dict[target_name]
             for layer in layers:
