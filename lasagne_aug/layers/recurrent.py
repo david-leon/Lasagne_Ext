@@ -24,7 +24,7 @@ class PLSTMTimeGate(object):
         self.On_End = On_End
 
 class PLSTMLayer(MergeLayer):
-    r"""
+    """
     """
     # GATE defaults: W_in=init.Normal(0.1), W_hid=init.Normal(0.1), W_cell=init.Normal(0.1), b=init.Constant(0.), nonlinearity=nonlinearities.sigmoid
     def __init__(self, incoming, time_input, num_units,

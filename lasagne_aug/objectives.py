@@ -4,7 +4,9 @@ from .ctc_theano import CTC_precise, CTC_for_train
 __all__ = [
     "categorical_accuracy_log",
     "ctc_cost_for_train",
-    "ctc_cost_precise"
+    "ctc_cost_precise",
+    "ctc_best_path_decode",
+    "ctc_CER"
 ]
 
 def categorical_crossentropy_log(predictions, targets):

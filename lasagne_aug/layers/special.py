@@ -1,9 +1,13 @@
 from lasagne.layers import Layer, MergeLayer
+import lasagne.init as init
+from theano import tensor
+from collections import OrderedDict
 
 #[DV] all 'int64' cast changed to 'int32'
 
 __all__ = [
     "ExpressionLayer_Merge",
+    "CenterLayer"
     # "DotLayer"
 ]
 
@@ -59,6 +63,44 @@ class ExpressionLayer_Merge(MergeLayer):
 
     def get_output_for(self, inputs, **kwargs):
         return self.function(inputs)
+
+class CenterLayer(MergeLayer):
+    """
+    Compute the class centers during training
+    Ref. to "Discriminative feature learning approach for deep face recognition (2016)"
+    """
+    def __init__(self, incomings, Ncenter, alpha=0.9, centers=init.GlorotUniform(), **kwargs):
+        """
+        :param incomings: incomings[0] = features, incomings[1] = target labels
+        :param alpha: moving averaging coefficient
+        :param center: initial value of center
+        :param kwargs:
+        """
+        super(CenterLayer, self).__init__(incomings, **kwargs)
+        feature_dim = incomings[0].output_shape[-1]
+        self.centers = self.add_param(centers, [Ncenter, feature_dim], name="centers")
+        self._output_shape = [Ncenter, feature_dim]
+        self.alpha = alpha
+        self.updates = OrderedDict()
+
+    def get_output_shape_for(self, input_shapes):
+        return self._output_shape
+
+    def get_output_for(self, inputs, deterministic=False, **kwargs):
+        if deterministic:
+            return self.centers
+        else:
+            features, labels = inputs
+            centers_batch = self.centers[labels,:]
+            diff = (self.alpha - 1.0) * (centers_batch - features)
+
+            centers_updated = tensor.inc_subtensor(self.centers[labels,:], diff)
+            self.add_update([[self.centers, centers_updated]])
+            return self.centers
+
+
+
+
 
 # class DotLayer(MergeLayer):
 #     """
