@@ -9,7 +9,7 @@ here = os.path.abspath(os.path.dirname(__file__))
 try:
     # obtain version string from __init__.py
     # Read ASCII file with builtin open() so __version__ is str in Python 2 and 3
-    with open(os.path.join(here, 'lasagne_aug', '__init__.py'), 'r') as f:
+    with open(os.path.join(here, 'lasagne_ext', '__init__.py'), 'r') as f:
         init_py = f.read()
     version = re.search('__version__ = "(.*)"', init_py).groups()[0]
 except Exception:
@@ -37,12 +37,11 @@ tests_require = [
     ]
 
 setup(
-    name="Lasagne_Aug",
+    name="Lasagne_Ext",
     version=version,
     description="Augment to Lasagne, including new layers, utility functions, etc. ",
     long_description="\n\n".join([README, CHANGES]),
     classifiers=[
-        "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
@@ -52,7 +51,7 @@ setup(
     keywords="",
     author="David Leon (Dawei Leng)",
     author_email="daweileng@outlook.com",
-    url="https://github.com/david-leon/Lasagne_Aug",
+    url="https://github.com/david-leon/Lasagne_Ext",
     license="MIT",
     packages=find_packages(),
     include_package_data=False,
