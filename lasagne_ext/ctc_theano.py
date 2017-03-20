@@ -320,9 +320,10 @@ class CTC_for_train(CTC_precise):
             # blank_symbol = scorematrix.shape[1] - 1.0
             blank_symbol = tensor.cast(scorematrix.shape[1], floatX) - 1.0
         queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
-        NLL, alphas = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
+        NLL = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
         NLL_avg = tensor.mean(NLL)
-        return NLL_avg
+        # return NLL_avg
+        return NLL
 
     @classmethod
     def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded=None, scorematrix_mask=None, blank_symbol=None):
@@ -363,7 +364,8 @@ class CTC_for_train(CTC_precise):
         LL = tensor.sum(queryseq_mask_padded, axis=0, dtype='int32')
         NLL = -self._log_add(alphas[TL - 1, tensor.arange(B), LL - 1],
                              alphas[TL - 1, tensor.arange(B), LL - 2])
-        return NLL, alphas
+        # return NLL, alphas
+        return pred_y
 
     @staticmethod
     def _epslog(x):
@@ -450,28 +452,32 @@ def ctc_path_probability(scorematrix, queryseq, blank):
 
 if __name__ == '__main__':
     import numpy as np, time
-    from ctc import best_path_decode
+    # from ctc import best_path_decode
     # np.random.seed(33)
-    B = 100
-    C = 100
-    L = 10
-    T = 5000
+    B = 2
+    C = 3
+    L = 5
+    T = 8
     x1, x2, x3, x4, x5 = tensor.imatrix(name='queryseq'), \
                          tensor.tensor3(dtype=floatX, name='scorematrix'), \
                          tensor.fmatrix(name='queryseq_mask'),\
                          tensor.fmatrix(name='scorematrix_mask'), \
                          tensor.iscalar(name='blank_symbol')
 
-    print('compile CTC_precise.cost() ...', end='')
-    result = CTC_precise.cost(x1, x2, x3, x4, x5)
-    f1 = theano.function([x1, x2, x3, x4, x5], result)
-    print(' done')
+    # print('compile CTC_precise.cost() ...', end='')
+    # result = CTC_precise.cost(x1, x2, x3, x4, x5)
+    # f1 = theano.function([x1, x2, x3, x4, x5], result)
+    # print(' done')
 
     print('compile CTC_for_train.cost() ...', end='')
-    result = CTC_for_train.cost(x1, x2, x3, x4, x5)
-    f2 = theano.function([x1, x2, x3, x4, x5], result)
+    result = CTC_for_train.cost(x1, x2)
+    f2 = theano.function([x1, x2], result)
     print(' done')
 
+    scorematrix = np.random.rand(B, C + 1, T)
+    query       = np.random.randint(0, C, (B, L))
+    result = f2(scorematrix, query)
+    print(result)
 
     # print('compile CTC.best_path_decode() ...', end='')
     # result = CTC.best_path_decode(x2)
