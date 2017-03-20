@@ -1,11 +1,19 @@
 # coding:utf-8
 __author__ = 'dawei.leng'
-__version__ = '1.47'
+__version__ = '1.48'
+
 """
-------------------------------------------------------------------------------------------------------------------------
  Another CTC implemented in theano.
+ The `cost()` function of `CTC_Timescale` and `CTC_Logscale` classes return the average NLL over a batch samples given query sequences and score matrices.
+ This implementation features:
+    1) batch / mask supported.
+    2) speed comparable with (~35% slower than) the numba implementation which is the fastest by now.
+
  Created   :  12, 10, 2015
- Revised   :   1, 10, 2017
+ Revised   :   8,  3, 2016   ver 1.46
+           :   1, 10, 2017   ver 1.47  fix wrong 'static_method' decorators.
+           :   3, 20, 2017   ver 1.48  add support for alignment {'pre'/'post'} for `CTC_Logscale` class
+
  Reference :  [1] Alex Graves, etc., Connectionist temporal classification: labelling unsegmented sequence data with
                   recurrent neural networks, ICML, 2006
               [2] Alex Graves, Supervised sequence labelling with recurrent neural networks, 2014
@@ -14,16 +22,15 @@ __version__ = '1.47'
               [4] Maas Andrew, etc., https://github.com/amaas/stanford-ctc/blob/master/ctc_fast/ctc-loss/ctc_fast.pyx
               [5] Mohammad Pezeshki, https://github.com/mohammadpz/CTC-Connectionist-Temporal-Classification/blob/master/ctc_cost.py
               [6] Shawn Tan, https://github.com/shawntan/rnn-experiment/blob/master/CTC.ipynb
-------------------------------------------------------------------------------------------------------------------------
 """
 import theano
 from theano import tensor
 from theano.ifelse import ifelse
 floatX = theano.config.floatX
 
-class CTC_precise(object):
+class CTC_Timescale(object):
     """
-    Compute CTC cost precisely, using time normalization instead of log scale computation.
+    Compute CTC cost using time normalization instead of log scale computation.
     Batch supported.
     To compute the batch cost, use .cost() function below.
     Speed slower than the numba & cython version (~6min vs ~3.9min on word_correction_CTC experiment), much faster than
@@ -49,7 +56,7 @@ class CTC_precise(object):
             # blank_symbol = scorematrix.shape[1] - 1
             blank_symbol = tensor.cast(scorematrix.shape[1], floatX) - 1.0
         queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
-        results = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
+        results = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol, align)
         NLL = -results[1][-1]                                             # negative log likelihood
         NLL_avg = tensor.mean(NLL)                                        # batch averaged NLL, used as cost
         # if scorematrix_mask is not None:
@@ -294,7 +301,7 @@ class CTC_precise(object):
         r3 = tensor.eye(L2, k=2).dimshuffle(0, 1, 'x') * sec_diag.dimshuffle(1, 'x', 0)         # (2L+1, 2L+1, B)
         return r2, r3
 
-class CTC_for_train(CTC_precise):
+class CTC_Logscale(CTC_Timescale):
     """
     This implementation uses log scale computation.
     Batch supported. Note the log scale computation used to produce imprecise CTC cost in Theano (path probability).
@@ -305,7 +312,7 @@ class CTC_for_train(CTC_precise):
     T: time length (maximum time length of a batch)
     """
     @classmethod
-    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None):
+    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None, align='pre'):
         """
         Compute CTC cost, using only the forward pass
         :param queryseq: (L, B)
@@ -313,20 +320,19 @@ class CTC_for_train(CTC_precise):
         :param queryseq_mask: (L, B)
         :param scorematrix_mask: (T, B)
         :param blank_symbol: scalar, = C by default
+        :param align: string, {'pre'/'post'}, indicating how input samples are aligned in one batch
         :return: negative log likelihood averaged over a batch
         """
-        print('CTC_for_train.cost is used')
         if blank_symbol is None:
             # blank_symbol = scorematrix.shape[1] - 1.0
             blank_symbol = tensor.cast(scorematrix.shape[1], floatX) - 1.0
         queryseq_padded, queryseq_mask_padded = self._pad_blanks(queryseq, blank_symbol, queryseq_mask)
-        NLL = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol)
+        NLL, alphas = self.path_probability(queryseq_padded, scorematrix, queryseq_mask_padded, scorematrix_mask, blank_symbol, align)
         NLL_avg = tensor.mean(NLL)
-        # return NLL_avg
-        return NLL
+        return NLL_avg
 
     @classmethod
-    def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded=None, scorematrix_mask=None, blank_symbol=None):
+    def path_probability(self, queryseq_padded, scorematrix, queryseq_mask_padded=None, scorematrix_mask=None, blank_symbol=None, align='pre'):
         """
         Compute p(l|x) using only the forward variable and log scale
         :param queryseq_padded: (2L+1, B)
@@ -360,12 +366,15 @@ class CTC_for_train(CTC_precise):
                 outputs_info=[self._epslog(tensor.eye(queryseq_padded.shape[0])[0] * tensor.ones(queryseq_padded.T.shape))])
 
         B = alphas.shape[1]
-        TL = tensor.sum(scorematrix_mask, axis=0, dtype='int32')
         LL = tensor.sum(queryseq_mask_padded, axis=0, dtype='int32')
-        NLL = -self._log_add(alphas[TL - 1, tensor.arange(B), LL - 1],
-                             alphas[TL - 1, tensor.arange(B), LL - 2])
-        # return NLL, alphas
-        return pred_y
+        if align == 'pre':
+            TL = tensor.sum(scorematrix_mask, axis=0, dtype='int32')
+            NLL = -self._log_add(alphas[TL - 1, tensor.arange(B), LL - 1],
+                                 alphas[TL - 1, tensor.arange(B), LL - 2])
+        else:  # align == 'post'
+            NLL = -self._log_add(alphas[-1, tensor.arange(B), LL - 1],
+                                 alphas[-1, tensor.arange(B), LL - 2])
+        return NLL, alphas
 
     @staticmethod
     def _epslog(x):
@@ -452,32 +461,28 @@ def ctc_path_probability(scorematrix, queryseq, blank):
 
 if __name__ == '__main__':
     import numpy as np, time
-    # from ctc import best_path_decode
+    from ctc import best_path_decode
     # np.random.seed(33)
-    B = 2
-    C = 3
-    L = 5
-    T = 8
+    B = 100
+    C = 100
+    L = 10
+    T = 5000
     x1, x2, x3, x4, x5 = tensor.imatrix(name='queryseq'), \
                          tensor.tensor3(dtype=floatX, name='scorematrix'), \
                          tensor.fmatrix(name='queryseq_mask'),\
                          tensor.fmatrix(name='scorematrix_mask'), \
                          tensor.iscalar(name='blank_symbol')
 
-    # print('compile CTC_precise.cost() ...', end='')
-    # result = CTC_precise.cost(x1, x2, x3, x4, x5)
-    # f1 = theano.function([x1, x2, x3, x4, x5], result)
-    # print(' done')
-
-    print('compile CTC_for_train.cost() ...', end='')
-    result = CTC_for_train.cost(x1, x2)
-    f2 = theano.function([x1, x2], result)
+    print('compile CTC_precise.cost() ...', end='')
+    result = CTC_precise.cost(x1, x2, x3, x4, x5)
+    f1 = theano.function([x1, x2, x3, x4, x5], result)
     print(' done')
 
-    scorematrix = np.random.rand(B, C + 1, T)
-    query       = np.random.randint(0, C, (B, L))
-    result = f2(scorematrix, query)
-    print(result)
+    print('compile CTC_for_train.cost() ...', end='')
+    result = CTC_for_train.cost(x1, x2, x3, x4, x5)
+    f2 = theano.function([x1, x2, x3, x4, x5], result)
+    print(' done')
+
 
     # print('compile CTC.best_path_decode() ...', end='')
     # result = CTC.best_path_decode(x2)
