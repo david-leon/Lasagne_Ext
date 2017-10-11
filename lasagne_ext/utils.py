@@ -241,6 +241,10 @@ class gpickle(object):
         data = pickle.loads(buf)
         return data
 
+    @staticmethod
+    def loads(buf):
+        return pickle.loads(buf)
+
 def save_model_raw(model, filename, userdata=None):
     """
     Save model weights and optional userdata into .gpkl file

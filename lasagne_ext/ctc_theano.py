@@ -42,7 +42,7 @@ class CTC_Timescale(object):
     T: time length (maximum time length of a batch)
     """
     @classmethod
-    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None):
+    def cost(self, queryseq, scorematrix, queryseq_mask=None, scorematrix_mask=None, blank_symbol=None, align='pre'):
         """
         Compute CTC cost, using only the forward pass
         :param queryseq: (L, B)
@@ -244,7 +244,7 @@ class CTC_Timescale(object):
     def _pad_blanks(queryseq, blank_symbol, queryseq_mask=None):
         """
         Pad queryseq and corresponding queryseq_mask with blank symbol
-        :param queryseq  (L, B)      must be float type!
+        :param queryseq  (L, B)
         :param queryseq_mask (L, B)
         :param blank_symbol  scalar, must be float type!
         :return queryseq_padded, queryseq_mask_padded, both with shape (2L+1, B)
